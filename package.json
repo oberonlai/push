@@ -1,0 +1,18 @@
+{
+  "name": "push",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "dev": "wrangler pages dev",
+    "deploy": "wrangler pages deploy",
+    "test": "node test/test-api.js",
+    "generate-vapid": "node test/generate-vapid.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@block65/webcrypto-web-push": "^1.0.2"
+  }
+}
