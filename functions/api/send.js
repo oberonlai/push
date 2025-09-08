@@ -1,4 +1,4 @@
-import { generateAuthenticationHeader } from '@block65/webcrypto-web-push';
+import { buildPushPayload } from '@block65/webcrypto-web-push';
 
 export async function onRequestPost(context) {
   const { request, env } = context;
@@ -73,119 +73,32 @@ export async function onRequestPost(context) {
 
     console.log(`[${requestId}] ✅ Site key 驗證通過:`, site_key);
 
-    // 處理 payload 加密
-    const encoder = new TextEncoder();
-    const payloadData = encoder.encode(JSON.stringify(payload));
-    console.log(`[${requestId}] 📦 Payload 大小:`, payloadData.length, 'bytes');
-
-    // 解碼 VAPID 金鑰
-    let privateKeyData, publicKeyData;
+    // 使用 buildPushPayload 建構推播請求
+    console.log(`[${requestId}] 🔨 建構推播 payload...`);
+    let pushPayload;
     try {
-      privateKeyData = base64UrlToUint8Array(vapid.private_key);
-      publicKeyData = base64UrlToUint8Array(vapid.public_key);
-      console.log(`[${requestId}] 🔑 VAPID 金鑰解碼成功`, {
-        private_key_length: privateKeyData.length,
-        public_key_length: publicKeyData.length
-      });
-    } catch (e) {
-      console.log(`[${requestId}] ❌ VAPID 金鑰解碼失敗:`, e.message);
-      return new Response(JSON.stringify({ 
-        error: 'Invalid VAPID key format',
-        details: e.message
-      }), {
-        status: 400,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        }
-      });
-    }
-
-    // 導入私鑰
-    let privateKey;
-    try {
-      privateKey = await crypto.subtle.importKey(
-        'pkcs8',
-        privateKeyData,
-        {
-          name: 'ECDSA',
-          namedCurve: 'P-256',
-        },
-        false,
-        ['sign']
-      );
-      console.log(`[${requestId}] 🔐 私鑰導入成功`);
-    } catch (e) {
-      console.log(`[${requestId}] ❌ 私鑰導入失敗:`, e.message);
-      return new Response(JSON.stringify({ 
-        error: 'Invalid private key',
-        details: e.message
-      }), {
-        status: 400,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        }
-      });
-    }
-
-    // 生成 VAPID 認證標頭
-    let authHeader;
-    try {
-      authHeader = await generateAuthenticationHeader({
-        endpoint: subscription.endpoint,
+      const vapidKeys = {
         subject: vapid.subject,
-        publicKey: publicKeyData,
-        privateKey: privateKey,
-        expiration: Math.floor(Date.now() / 1000) + (12 * 60 * 60),
-      });
-      console.log(`[${requestId}] 🎫 VAPID 認證標頭生成成功`);
-    } catch (e) {
-      console.log(`[${requestId}] ❌ VAPID 認證標頭生成失敗:`, e.message);
-      return new Response(JSON.stringify({ 
-        error: 'Failed to generate VAPID auth header',
-        details: e.message
-      }), {
-        status: 500,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        }
-      });
-    }
+        publicKey: vapid.public_key,
+        privateKey: vapid.private_key,
+      };
 
-    // 解碼訂閱金鑰
-    let userPublicKey, authSecret;
-    try {
-      userPublicKey = base64UrlToUint8Array(subscription.keys.p256dh);
-      authSecret = base64UrlToUint8Array(subscription.keys.auth);
-      console.log(`[${requestId}] 🔑 訂閱金鑰解碼成功`, {
-        p256dh_length: userPublicKey.length,
-        auth_length: authSecret.length
-      });
+      pushPayload = await buildPushPayload(
+        { data: JSON.stringify(payload) }, // message
+        subscription, // subscription
+        vapidKeys // vapid keys
+      );
+      
+      console.log(`[${requestId}] ✅ 推播 payload 建構成功`);
+      console.log(`[${requestId}] 📤 請求方法:`, pushPayload.method);
+      console.log(`[${requestId}] 📋 請求標頭:`, pushPayload.headers);
+      console.log(`[${requestId}] 📦 Body 大小:`, pushPayload.body ? pushPayload.body.byteLength : 0, 'bytes');
+      
     } catch (e) {
-      console.log(`[${requestId}] ❌ 訂閱金鑰解碼失敗:`, e.message);
+      console.log(`[${requestId}] ❌ 建構推播 payload 失敗:`, e.message);
+      console.log(`[${requestId}] 錯誤詳情:`, e.stack);
       return new Response(JSON.stringify({ 
-        error: 'Invalid subscription keys',
-        details: e.message
-      }), {
-        status: 400,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        }
-      });
-    }
-
-    // 加密 payload
-    let encryptedPayload;
-    try {
-      encryptedPayload = await encryptPayload(userPublicKey, authSecret, payloadData);
-      console.log(`[${requestId}] 🔒 Payload 加密成功，大小:`, encryptedPayload.length, 'bytes');
-    } catch (e) {
-      console.log(`[${requestId}] ❌ Payload 加密失敗:`, e.message);
-      return new Response(JSON.stringify({ 
-        error: 'Failed to encrypt payload',
+        error: 'Failed to build push payload',
         details: e.message
       }), {
         status: 500,
@@ -198,19 +111,8 @@ export async function onRequestPost(context) {
 
     // 發送推播請求
     console.log(`[${requestId}] 🚀 發送推播到:`, subscription.endpoint);
-    const pushHeaders = {
-      'Content-Type': 'application/octet-stream',
-      'Content-Encoding': 'aes128gcm',
-      'Authorization': authHeader,
-      'TTL': '86400',
-    };
-    console.log(`[${requestId}] 📤 推播請求標頭:`, pushHeaders);
 
-    const response = await fetch(subscription.endpoint, {
-      method: 'POST',
-      headers: pushHeaders,
-      body: encryptedPayload,
-    });
+    const response = await fetch(subscription.endpoint, pushPayload);
 
     console.log(`[${requestId}] 📨 推播回應狀態:`, response.status, response.statusText);
 
@@ -279,135 +181,4 @@ export async function onRequestOptions(context) {
       'Access-Control-Max-Age': '86400',
     }
   });
-}
-
-function base64UrlToUint8Array(base64String) {
-  const padding = '='.repeat((4 - base64String.length % 4) % 4);
-  const base64 = (base64String + padding)
-    .replace(/-/g, '+')
-    .replace(/_/g, '/');
-
-  const rawData = atob(base64);
-  const outputArray = new Uint8Array(rawData.length);
-
-  for (let i = 0; i < rawData.length; ++i) {
-    outputArray[i] = rawData.charCodeAt(i);
-  }
-  return outputArray;
-}
-
-async function encryptPayload(userPublicKey, authSecret, payload) {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-
-  const serverKeyPair = await crypto.subtle.generateKey(
-    {
-      name: 'ECDH',
-      namedCurve: 'P-256',
-    },
-    true,
-    ['deriveKey', 'deriveBits']
-  );
-
-  const publicKey = await crypto.subtle.importKey(
-    'raw',
-    userPublicKey,
-    {
-      name: 'ECDH',
-      namedCurve: 'P-256',
-    },
-    false,
-    []
-  );
-
-  const sharedSecret = await crypto.subtle.deriveBits(
-    {
-      name: 'ECDH',
-      public: publicKey,
-    },
-    serverKeyPair.privateKey,
-    256
-  );
-
-  const authInfo = new TextEncoder().encode('Content-Encoding: auth\0');
-  const prk = await hkdf(new Uint8Array(sharedSecret), authSecret, authInfo, 32);
-
-  const serverPublicKey = await crypto.subtle.exportKey('raw', serverKeyPair.publicKey);
-  const context = concatArrays(
-    new TextEncoder().encode('P-256\0'),
-    new Uint8Array([0, 65]),
-    new Uint8Array(userPublicKey),
-    new Uint8Array([0, 65]),
-    new Uint8Array(serverPublicKey)
-  );
-
-  const contentEncryptionKeyInfo = concatArrays(
-    new TextEncoder().encode('Content-Encoding: aes128gcm\0'),
-    context
-  );
-  const contentEncryptionKey = await hkdf(prk, salt, contentEncryptionKeyInfo, 16);
-
-  const nonceInfo = concatArrays(
-    new TextEncoder().encode('Content-Encoding: nonce\0'),
-    context
-  );
-  const nonce = await hkdf(prk, salt, nonceInfo, 12);
-
-  const paddingLength = 0;
-  const paddedPayload = concatArrays(
-    payload,
-    new Uint8Array([2]),
-    new Uint8Array(paddingLength)
-  );
-
-  const encryptedData = await crypto.subtle.encrypt(
-    {
-      name: 'AES-GCM',
-      iv: nonce,
-    },
-    await crypto.subtle.importKey('raw', contentEncryptionKey, 'AES-GCM', false, ['encrypt']),
-    paddedPayload
-  );
-
-  const header = concatArrays(
-    salt,
-    new Uint8Array([0, 0, 16, 0]),
-    new Uint8Array([65]),
-    new Uint8Array(serverPublicKey)
-  );
-
-  return concatArrays(header, new Uint8Array(encryptedData));
-}
-
-async function hkdf(ikm, salt, info, length) {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    ikm,
-    { name: 'HKDF' },
-    false,
-    ['deriveBits']
-  );
-
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: 'HKDF',
-      hash: 'SHA-256',
-      salt: salt,
-      info: info,
-    },
-    key,
-    length * 8
-  );
-
-  return new Uint8Array(bits);
-}
-
-function concatArrays(...arrays) {
-  const totalLength = arrays.reduce((acc, arr) => acc + arr.length, 0);
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const arr of arrays) {
-    result.set(arr, offset);
-    offset += arr.length;
-  }
-  return result;
 }
