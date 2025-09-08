@@ -1,4 +1,4 @@
-import { generateAuthenticationHeader } from '@block65/webcrypto-web-push';
+import { vapidHeaders } from '@block65/webcrypto-web-push';
 
 export async function onRequestPost(context) {
   const { request, env } = context;
@@ -60,26 +60,10 @@ export async function onRequestPost(context) {
     const encoder = new TextEncoder();
     const payloadData = encoder.encode(JSON.stringify(payload));
 
-    const privateKeyData = base64UrlToUint8Array(vapid.private_key);
-    const publicKeyData = base64UrlToUint8Array(vapid.public_key);
-
-    const privateKey = await crypto.subtle.importKey(
-      'pkcs8',
-      privateKeyData,
-      {
-        name: 'ECDSA',
-        namedCurve: 'P-256',
-      },
-      false,
-      ['sign']
-    );
-
-    const authHeader = await generateAuthenticationHeader({
-      endpoint: subscription.endpoint,
+    const vapidHeadersResult = await vapidHeaders(subscription, {
       subject: vapid.subject,
-      publicKey: publicKeyData,
-      privateKey: privateKey,
-      expiration: Math.floor(Date.now() / 1000) + (12 * 60 * 60),
+      publicKey: vapid.public_key,
+      privateKey: vapid.private_key,
     });
 
     const userPublicKey = base64UrlToUint8Array(subscription.keys.p256dh);
@@ -96,7 +80,8 @@ export async function onRequestPost(context) {
       headers: {
         'Content-Type': 'application/octet-stream',
         'Content-Encoding': 'aes128gcm',
-        'Authorization': authHeader,
+        'Authorization': vapidHeadersResult.headers.authorization,
+        'Crypto-Key': vapidHeadersResult.headers['crypto-key'],
         'TTL': '86400',
       },
       body: encryptedPayload,
