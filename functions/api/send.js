@@ -1,11 +1,15 @@
-import { vapidHeaders } from '@block65/webcrypto-web-push';
+import { generateAuthenticationHeader } from '@block65/webcrypto-web-push';
 
 export async function onRequestPost(context) {
   const { request, env } = context;
+  const requestId = Math.random().toString(36).substring(2, 8);
+  
+  console.log(`[${requestId}] === 新推播請求開始 ===`);
 
   try {
     const contentType = request.headers.get('content-type');
     if (!contentType || !contentType.includes('application/json')) {
+      console.log(`[${requestId}] ❌ Content-Type 錯誤:`, contentType);
       return new Response(JSON.stringify({ 
         error: 'Content-Type must be application/json' 
       }), {
@@ -19,8 +23,16 @@ export async function onRequestPost(context) {
 
     const body = await request.json();
     const { site_key, vapid, subscription, payload } = body;
+    
+    console.log(`[${requestId}] 📋 請求資料:`, {
+      site_key,
+      vapid_subject: vapid?.subject,
+      subscription_endpoint: subscription?.endpoint,
+      payload_title: payload?.title
+    });
 
     if (!site_key || !vapid || !subscription || !payload) {
+      console.log(`[${requestId}] ❌ 缺少必要欄位`);
       return new Response(JSON.stringify({ 
         error: 'Missing required fields: site_key, vapid, subscription, payload' 
       }), {
@@ -33,6 +45,7 @@ export async function onRequestPost(context) {
     }
 
     if (!vapid.subject || !vapid.public_key || !vapid.private_key) {
+      console.log(`[${requestId}] ❌ VAPID 設定不完整`);
       return new Response(JSON.stringify({ 
         error: 'Invalid VAPID configuration. Required: subject, public_key, private_key' 
       }), {
@@ -46,6 +59,7 @@ export async function onRequestPost(context) {
 
     const allowedSiteKeys = env.ALLOWED_SITE_KEYS ? env.ALLOWED_SITE_KEYS.split(',') : null;
     if (allowedSiteKeys && !allowedSiteKeys.includes(site_key)) {
+      console.log(`[${requestId}] ❌ Site key 驗證失敗:`, { site_key, allowed: allowedSiteKeys });
       return new Response(JSON.stringify({ 
         error: 'Invalid site key' 
       }), {
@@ -57,41 +71,161 @@ export async function onRequestPost(context) {
       });
     }
 
+    console.log(`[${requestId}] ✅ Site key 驗證通過:`, site_key);
+
+    // 處理 payload 加密
     const encoder = new TextEncoder();
     const payloadData = encoder.encode(JSON.stringify(payload));
+    console.log(`[${requestId}] 📦 Payload 大小:`, payloadData.length, 'bytes');
 
-    const vapidHeadersResult = await vapidHeaders(subscription, {
-      subject: vapid.subject,
-      publicKey: vapid.public_key,
-      privateKey: vapid.private_key,
-    });
+    // 解碼 VAPID 金鑰
+    let privateKeyData, publicKeyData;
+    try {
+      privateKeyData = base64UrlToUint8Array(vapid.private_key);
+      publicKeyData = base64UrlToUint8Array(vapid.public_key);
+      console.log(`[${requestId}] 🔑 VAPID 金鑰解碼成功`, {
+        private_key_length: privateKeyData.length,
+        public_key_length: publicKeyData.length
+      });
+    } catch (e) {
+      console.log(`[${requestId}] ❌ VAPID 金鑰解碼失敗:`, e.message);
+      return new Response(JSON.stringify({ 
+        error: 'Invalid VAPID key format',
+        details: e.message
+      }), {
+        status: 400,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        }
+      });
+    }
 
-    const userPublicKey = base64UrlToUint8Array(subscription.keys.p256dh);
-    const authSecret = base64UrlToUint8Array(subscription.keys.auth);
+    // 導入私鑰
+    let privateKey;
+    try {
+      privateKey = await crypto.subtle.importKey(
+        'pkcs8',
+        privateKeyData,
+        {
+          name: 'ECDSA',
+          namedCurve: 'P-256',
+        },
+        false,
+        ['sign']
+      );
+      console.log(`[${requestId}] 🔐 私鑰導入成功`);
+    } catch (e) {
+      console.log(`[${requestId}] ❌ 私鑰導入失敗:`, e.message);
+      return new Response(JSON.stringify({ 
+        error: 'Invalid private key',
+        details: e.message
+      }), {
+        status: 400,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        }
+      });
+    }
 
-    const encryptedPayload = await encryptPayload(
-      userPublicKey,
-      authSecret,
-      payloadData
-    );
+    // 生成 VAPID 認證標頭
+    let authHeader;
+    try {
+      authHeader = await generateAuthenticationHeader({
+        endpoint: subscription.endpoint,
+        subject: vapid.subject,
+        publicKey: publicKeyData,
+        privateKey: privateKey,
+        expiration: Math.floor(Date.now() / 1000) + (12 * 60 * 60),
+      });
+      console.log(`[${requestId}] 🎫 VAPID 認證標頭生成成功`);
+    } catch (e) {
+      console.log(`[${requestId}] ❌ VAPID 認證標頭生成失敗:`, e.message);
+      return new Response(JSON.stringify({ 
+        error: 'Failed to generate VAPID auth header',
+        details: e.message
+      }), {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        }
+      });
+    }
+
+    // 解碼訂閱金鑰
+    let userPublicKey, authSecret;
+    try {
+      userPublicKey = base64UrlToUint8Array(subscription.keys.p256dh);
+      authSecret = base64UrlToUint8Array(subscription.keys.auth);
+      console.log(`[${requestId}] 🔑 訂閱金鑰解碼成功`, {
+        p256dh_length: userPublicKey.length,
+        auth_length: authSecret.length
+      });
+    } catch (e) {
+      console.log(`[${requestId}] ❌ 訂閱金鑰解碼失敗:`, e.message);
+      return new Response(JSON.stringify({ 
+        error: 'Invalid subscription keys',
+        details: e.message
+      }), {
+        status: 400,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        }
+      });
+    }
+
+    // 加密 payload
+    let encryptedPayload;
+    try {
+      encryptedPayload = await encryptPayload(userPublicKey, authSecret, payloadData);
+      console.log(`[${requestId}] 🔒 Payload 加密成功，大小:`, encryptedPayload.length, 'bytes');
+    } catch (e) {
+      console.log(`[${requestId}] ❌ Payload 加密失敗:`, e.message);
+      return new Response(JSON.stringify({ 
+        error: 'Failed to encrypt payload',
+        details: e.message
+      }), {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        }
+      });
+    }
+
+    // 發送推播請求
+    console.log(`[${requestId}] 🚀 發送推播到:`, subscription.endpoint);
+    const pushHeaders = {
+      'Content-Type': 'application/octet-stream',
+      'Content-Encoding': 'aes128gcm',
+      'Authorization': authHeader,
+      'TTL': '86400',
+    };
+    console.log(`[${requestId}] 📤 推播請求標頭:`, pushHeaders);
 
     const response = await fetch(subscription.endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'Content-Encoding': 'aes128gcm',
-        'Authorization': vapidHeadersResult.headers.authorization,
-        'Crypto-Key': vapidHeadersResult.headers['crypto-key'],
-        'TTL': '86400',
-      },
+      headers: pushHeaders,
       body: encryptedPayload,
     });
 
+    console.log(`[${requestId}] 📨 推播回應狀態:`, response.status, response.statusText);
+
     if (!response.ok) {
       const errorText = await response.text();
+      console.log(`[${requestId}] ❌ 推播失敗:`, {
+        status: response.status,
+        statusText: response.statusText,
+        error: errorText
+      });
+      
       return new Response(JSON.stringify({ 
         error: `Push service error: ${response.status}`,
-        details: errorText
+        details: errorText,
+        endpoint: subscription.endpoint
       }), {
         status: response.status,
         headers: {
@@ -101,9 +235,14 @@ export async function onRequestPost(context) {
       });
     }
 
+    const responseText = await response.text();
+    console.log(`[${requestId}] ✅ 推播成功！回應:`, responseText);
+
     return new Response(JSON.stringify({ 
       success: true,
-      message: 'Push notification sent successfully'
+      message: 'Push notification sent successfully',
+      endpoint: subscription.endpoint,
+      request_id: requestId
     }), {
       status: 200,
       headers: {
@@ -113,10 +252,13 @@ export async function onRequestPost(context) {
     });
 
   } catch (error) {
-    console.error('Push notification error:', error);
+    console.error(`[${requestId}] 💥 推播發生錯誤:`, error);
+    console.error(`[${requestId}] 錯誤堆疊:`, error.stack);
+    
     return new Response(JSON.stringify({ 
       error: 'Internal server error',
-      details: error.message
+      details: error.message,
+      request_id: requestId
     }), {
       status: 500,
       headers: {
